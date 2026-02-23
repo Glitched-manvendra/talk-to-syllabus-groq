@@ -12,7 +12,7 @@
 User  ->  Vercel Frontend (Next.js 14)
          ->  Serverless API (Vercel Functions)
            ->  Supabase (PostgreSQL + pgvector)
-           ->  HuggingFace Inference API (Embeddings + LLM)
+           ->  HuggingFace Inference API (Embeddings + LLM) or Groq cloud api (embedding+LLM)
          ->  Cached / AI-Generated Response
 ```
 
