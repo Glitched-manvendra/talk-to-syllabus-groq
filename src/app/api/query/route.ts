@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { generateEmbedding } from "@/lib/embeddings";
+import { toSearchQuery } from "@/lib/embeddings";
 import { generateAnswer, type AnswerMode } from "@/lib/llm";
 import { hashQuestion, getCachedAnswer, cacheAnswer } from "@/lib/cache";
 import { getServiceSupabase } from "@/lib/supabase";
@@ -53,26 +53,62 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Step 2: Generate embedding for the question
-    const queryEmbedding = await generateEmbedding(question);
-
-    // Step 3: Vector similarity search
+    // Step 2: Full-text search for matching chunks
     const supabase = getServiceSupabase();
-    const { data: matches, error: matchError } = await supabase.rpc(
-      "match_chunks",
-      {
-        query_embedding: JSON.stringify(queryEmbedding),
-        match_count: 5,
-        filter_course: course,
-      }
-    );
+    const searchQuery = toSearchQuery(question);
 
-    if (matchError) {
-      console.error("Vector search error:", matchError);
-      return NextResponse.json(
-        { error: "Failed to search syllabus content" },
-        { status: 500 }
-      );
+    let matches: any[] = [];
+
+    if (searchQuery) {
+      // Try full-text search first
+      const { data: ftsMatches, error: ftsError } = await supabase
+        .from("chunks")
+        .select(`
+          id,
+          content,
+          chunk_index,
+          document_id,
+          documents!inner(course_name, status)
+        `)
+        .eq("documents.course_name", course)
+        .eq("documents.status", "completed")
+        .textSearch("content", searchQuery)
+        .limit(5);
+
+      if (!ftsError && ftsMatches && ftsMatches.length > 0) {
+        matches = ftsMatches;
+      } else {
+        // Fallback: use ILIKE with keywords for broader matching
+        const keywords = question
+          .replace(/[^\w\s]/g, "")
+          .split(/\s+/)
+          .filter((w) => w.length > 2);
+
+        if (keywords.length > 0) {
+          // Search for chunks containing any of the keywords
+          const orFilter = keywords
+            .map((kw) => `content.ilike.%${kw}%`)
+            .join(",");
+
+          const { data: likeMatches, error: likeError } = await supabase
+            .from("chunks")
+            .select(`
+              id,
+              content,
+              chunk_index,
+              document_id,
+              documents!inner(course_name, status)
+            `)
+            .eq("documents.course_name", course)
+            .eq("documents.status", "completed")
+            .or(orFilter)
+            .limit(5);
+
+          if (!likeError && likeMatches) {
+            matches = likeMatches;
+          }
+        }
+      }
     }
 
     if (!matches || matches.length === 0) {
@@ -85,26 +121,24 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Step 4: Extract context chunks
-    const contextChunks = matches.map(
-      (m: any) => m.content
-    );
+    // Step 3: Extract context chunks
+    const contextChunks = matches.map((m: any) => m.content);
     const sources = matches.map(
       (m: any) =>
-        `[Chunk ${m.chunk_index + 1}] (similarity: ${(m.similarity * 100).toFixed(1)}%) ${m.content.substring(0, 100)}...`
+        `[Chunk ${m.chunk_index + 1}] ${m.content.substring(0, 100)}...`
     );
 
-    // Step 5: Generate answer via LLM
+    // Step 4: Generate answer via LLM
     const answer = await generateAnswer(
       question,
       contextChunks,
       mode as AnswerMode
     );
 
-    // Step 6: Cache the result
+    // Step 5: Cache the result
     await cacheAnswer(qHash, question, course, mode, answer, sources);
 
-    // Step 7: Log analytics
+    // Step 6: Log analytics
     await logAnalytics(course, question, mode, false, Date.now() - startTime);
 
     return NextResponse.json({
