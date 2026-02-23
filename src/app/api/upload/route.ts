@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { extractTextFromPDF, chunkText } from "@/lib/pdf";
-import { generateEmbeddings } from "@/lib/embeddings";
 import { getServiceSupabase } from "@/lib/supabase";
 
 export const runtime = "nodejs";
@@ -114,14 +113,10 @@ export async function POST(request: NextRequest) {
     // Step 4: Chunk the text
     const chunks = chunkText(text, 200, 50);
 
-    // Step 5: Generate embeddings for all chunks
-    const embeddings = await generateEmbeddings(chunks.map((c) => c));
-
-    // Step 6: Insert chunks with embeddings
+    // Step 5: Insert chunks (no embeddings - using full-text search instead)
     const chunkRecords = chunks.map((content, index) => ({
       document_id: documentId,
       content,
-      embedding: JSON.stringify(embeddings[index]),
       chunk_index: index,
       metadata: { char_count: content.length },
     }));
@@ -141,13 +136,13 @@ export async function POST(request: NextRequest) {
           .update({ status: "error" })
           .eq("id", documentId);
         return NextResponse.json(
-          { error: "Failed to store document chunks" },
+          { error: `Failed to store document chunks: ${insertError.message}` },
           { status: 500 }
         );
       }
     }
 
-    // Step 7: Update document status
+    // Step 6: Update document status
     await supabase
       .from("documents")
       .update({
@@ -163,9 +158,10 @@ export async function POST(request: NextRequest) {
       message: `Successfully processed ${file.name} into ${chunks.length} searchable chunks.`,
     });
   } catch (error: any) {
-    console.error("Upload API error:", error);
+    console.error("Upload API error:", error?.message || error);
+    console.error("Stack trace:", error?.stack);
     return NextResponse.json(
-      { error: "Internal server error during upload." },
+      { error: `Internal server error during upload: ${error?.message || "Unknown error"}` },
       { status: 500 }
     );
   }

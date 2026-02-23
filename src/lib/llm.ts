@@ -1,11 +1,7 @@
-import { HfInference } from "@huggingface/inference";
-
-const hf = new HfInference(process.env.HUGGINGFACE_API_KEY || "");
-
-// Use a free, capable model from HuggingFace that is confirmed to work on router
-const LLM_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct";
-
 export type AnswerMode = "simple" | "exam" | "summary";
+
+const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_MODEL = "llama-3.1-8b-instant";
 
 const SYSTEM_PROMPTS: Record<AnswerMode, string> = {
   simple: `You are an academic assistant for ABES Engineering College.
@@ -36,7 +32,7 @@ Do NOT make up information.`,
 };
 
 /**
- * Call the LLM to generate an answer.
+ * Call the Groq LLM API to generate an answer.
  */
 export async function generateAnswer(
   question: string,
@@ -48,35 +44,68 @@ export async function generateAnswer(
   const systemContent = SYSTEM_PROMPTS[mode];
   const userContent = `--- SYLLABUS CONTEXT ---\n${context}\n--- END CONTEXT ---\n\nStudent's Question: ${question}`;
 
+  const groqApiKey = process.env.GROQ_API_KEY;
+  if (!groqApiKey) {
+    throw new Error("Missing GROQ_API_KEY environment variable");
+  }
+
   try {
-    const response = await hf.chatCompletion({
-      model: LLM_MODEL,
-      messages: [
-        { role: "system", content: systemContent },
-        { role: "user", content: userContent },
-      ],
-      max_tokens: 800,
-      temperature: 0.3,
-      top_p: 0.9,
-    });
-
-    return response.choices[0].message.content || "No answer generated.";
-  } catch (error: any) {
-    console.error("Primary LLM failed:", error.message);
-
-    // Fallback to a backup model if primary fails
-    try {
-      console.log("Attempting fallback to Zephyr...");
-      const fallbackResponse = await hf.chatCompletion({
-        model: "HuggingFaceH4/zephyr-7b-beta",
+    const response = await fetch(GROQ_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${groqApiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
         messages: [
           { role: "system", content: systemContent },
           { role: "user", content: userContent },
         ],
-        max_tokens: 500,
+        max_tokens: 800,
         temperature: 0.3,
+        top_p: 0.9,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+        `Groq API Error: ${response.status} ${response.statusText} - ${errorText}`
+      );
+    }
+
+    const data = await response.json();
+    return data.choices[0].message.content || "No answer generated.";
+  } catch (error: any) {
+    console.error("Groq LLM failed:", error.message);
+
+    // Fallback to a different Groq model
+    try {
+      console.log("Attempting fallback to gemma2-9b-it...");
+      const fallbackResponse = await fetch(GROQ_API_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${groqApiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gemma2-9b-it",
+          messages: [
+            { role: "system", content: systemContent },
+            { role: "user", content: userContent },
+          ],
+          max_tokens: 500,
+          temperature: 0.3,
+        }),
       });
-      return fallbackResponse.choices[0].message.content || "No answer generated.";
+
+      if (!fallbackResponse.ok) {
+        throw new Error(`Fallback failed: ${fallbackResponse.status}`);
+      }
+
+      const fallbackData = await fallbackResponse.json();
+      return fallbackData.choices[0].message.content || "No answer generated.";
     } catch (fallbackError: any) {
       console.error("Fallback LLM also failed:", fallbackError.message);
       return "I'm sorry, the AI service is temporarily unavailable. Please try again in a moment.";
